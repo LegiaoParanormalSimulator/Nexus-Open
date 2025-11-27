@@ -16,6 +16,8 @@ namespace Nexus.Networking
         [SerializeField] private PlayerController playerController;
         [SerializeField] private TabletopManager tabletopManager;
 
+        public Camera PlayerCamera => playerCamera;
+
         [Header("Player Info")]
         [SyncVar] public string playerName = "Player";
         [SyncVar] public Color playerColor = Color.white;

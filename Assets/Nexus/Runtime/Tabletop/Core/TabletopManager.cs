@@ -6,6 +6,71 @@ namespace Nexus
 {
     public class TabletopManager : MonoBehaviour
     {
+        private static TabletopManager _activeInstance;
+        public static TabletopManager GetActive()
+        {
+            if (_activeInstance != null && _activeInstance.isActiveAndEnabled)
+                return _activeInstance;
+
+            // Only consider active and enabled instances
+            var all = Object.FindObjectsOfType<TabletopManager>();
+            if (all == null || all.Length == 0) { _activeInstance = null; return null; }
+
+            // 0) Prefer a scene-level manager not under any NetworkPlayer
+            for (int i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (!t.isActiveAndEnabled) continue;
+                var owner = t.GetComponentInParent<Nexus.Networking.NetworkPlayer>();
+                if (owner == null)
+                {
+                    _activeInstance = t;
+                    return _activeInstance;
+                }
+            }
+
+            // 1) Prefer instance explicitly bound to the local player
+            for (int i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (!t.isActiveAndEnabled) continue;
+                if (t.boundLocalPlayer != null && t.boundLocalPlayer.isLocalPlayer)
+                {
+                    _activeInstance = t;
+                    return _activeInstance;
+                }
+            }
+
+            // 2) Prefer instance under a local NetworkPlayer hierarchy
+            for (int i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (!t.isActiveAndEnabled) continue;
+                var owner = t.GetComponentInParent<Nexus.Networking.NetworkPlayer>();
+                if (owner != null && owner.isLocalPlayer)
+                {
+                    _activeInstance = t;
+                    return _activeInstance;
+                }
+            }
+
+            // 3) Fallback: first active one
+            for (int i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (t.isActiveAndEnabled)
+                {
+                    _activeInstance = t;
+                    return _activeInstance;
+                }
+            }
+            _activeInstance = null;
+            return null;
+        }
+
+        private void OnEnable() { _activeInstance = null; }
+        private void OnDisable() { if (_activeInstance == this) _activeInstance = null; }
+
         [Header("References")]
         [SerializeField] private Camera mainCamera;
 
@@ -54,8 +119,58 @@ namespace Nexus
 
         private void Start()
         {
-            if (mainCamera == null && Nexus.CameraManager.Instance != null)
-                mainCamera = Nexus.CameraManager.Instance.MainCamera;
+            if (mainCamera == null)
+            {
+                if (Nexus.CameraManager.Instance != null && Nexus.CameraManager.Instance.MainCamera != null)
+                    mainCamera = Nexus.CameraManager.Instance.MainCamera;
+                else if (Camera.main != null)
+                    mainCamera = Camera.main;
+            }
+        }
+
+        private bool TrySelectUnderMouse()
+        {
+            if (mainCamera == null) return false;
+            Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 500f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Collide);
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+            for (int i = 0; i < hits.Length; i++)
+            {
+                var tokenSetup = hits[i].transform.GetComponentInParent<TokenSetup>();
+                if (tokenSetup != null)
+                {
+                    Select(tokenSetup.transform);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // External helpers: allow other systems to push undo entries
+        public void PushMoveUndo(GameObject target, Vector3 oldPos, Quaternion oldRot, Vector3 newPos, Quaternion newRot)
+        {
+            if (target == null) return;
+            undoStack.Push(new UndoAction
+            {
+                actionType = UndoActionType.Move,
+                targetObject = target,
+                oldPosition = oldPos,
+                newPosition = newPos,
+                oldRotation = oldRot,
+                newRotation = newRot
+            });
+        }
+
+        public void PushRotateUndo(GameObject target, Quaternion oldRot, Quaternion newRot)
+        {
+            if (target == null) return;
+            undoStack.Push(new UndoAction
+            {
+                actionType = UndoActionType.Rotate,
+                targetObject = target,
+                oldRotation = oldRot,
+                newRotation = newRot
+            });
         }
 
         private Nexus.Networking.NetworkPlayer boundLocalPlayer;
@@ -63,20 +178,39 @@ namespace Nexus
 
         private void Update()
         {
-            // Always ensure we have the correct camera from CameraManager
-            if (Nexus.CameraManager.Instance != null)
+            if (GetActive() != this) return;
+            // Always ensure we have the correct camera, preferring the bound local player's camera
+            if (boundLocalPlayer != null && boundLocalPlayer.isLocalPlayer && boundLocalPlayer.PlayerCamera != null && boundLocalPlayer.PlayerCamera.isActiveAndEnabled)
             {
-                mainCamera = Nexus.CameraManager.Instance.MainCamera;
+                mainCamera = boundLocalPlayer.PlayerCamera;
             }
-            
-            if (mainCamera == null) return;
+            else if (Nexus.CameraManager.Instance != null)
+            {
+                var cam = Nexus.CameraManager.Instance.MainCamera;
+                if (cam != null) mainCamera = cam;
+            }
+            else
+            {
+                var cam = Camera.main;
+                if (cam != null) mainCamera = cam;
+            }
 
-            HandleSelection();
-            HandleObjectManipulation();
-            if (isDragging) MoveSelectedObject();
+            // Only selection/movement require camera; shortcuts should always work
+            if (mainCamera != null)
+            {
+                HandleSelection();
+                HandleObjectManipulation();
+                if (isDragging) MoveSelectedObject();
+            }
             HandleUndo();
             HandleCopyPaste();
             HandleDelete();
+        }
+
+        private static bool IsCtrlPressed()
+        {
+            return Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl) ||
+                   Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand);
         }
 
 
@@ -98,34 +232,16 @@ namespace Nexus
                 // Prefer tokens first
                 for (int i = 0; i < hits.Length && bestTarget == null; i++)
                 {
-                    var token = hits[i].transform.GetComponentInParent<Nexus.Networking.NetworkedToken>();
-                    if (token != null)
+                    var tokenSetup = hits[i].transform.GetComponentInParent<TokenSetup>();
+                    if (tokenSetup != null)
                     {
-                        bestTarget = token.transform;
+                        bestTarget = tokenSetup.transform;
                         bestIsToken = true;
                         bestHit = hits[i];
                         break;
                     }
                 }
-                // Then Movable parents
-                if (bestTarget == null)
-                {
-                    for (int i = 0; i < hits.Length && bestTarget == null; i++)
-                    {
-                        Transform walker = hits[i].transform;
-                        while (walker != null)
-                        {
-                            if (walker.CompareTag("Movable"))
-                            {
-                                bestTarget = walker;
-                                bestIsMovable = true;
-                                bestHit = hits[i];
-                                break;
-                            }
-                            walker = walker.parent;
-                        }
-                    }
-                }
+                // Tokens only: do not select generic Movables
 
                 if (bestTarget != null)
                 {
@@ -133,11 +249,6 @@ namespace Nexus
                     {
                         Deselect();
                         Select(bestTarget);
-                        SaveStateAndStartDragging(bestHit);
-                    }
-                    else
-                    {
-                        SaveStateAndStartDragging(bestHit);
                     }
                     Debug.Log($"Selected: {bestTarget.name} (Token: {bestIsToken}, Movable: {bestIsMovable})");
                 }
@@ -181,19 +292,23 @@ namespace Nexus
                 currentDistance = Mathf.Clamp(currentDistance - scroll * scrollSpeed, 1f, 50f);
             }
 
-            // Rotation (R + Scroll)
+            // Rotation (R + Scroll) works even when not dragging
             if (Input.GetKey(KeyCode.R) && Mathf.Abs(scroll) > 0.001f)
             {
                 Quaternion oldRotation = selectedObject.rotation;
                 float rotAmount = scroll * rotationSpeed;
-                targetRotation *= Quaternion.Euler(Vector3.up * rotAmount);
-                
+                Quaternion newRotation = oldRotation * Quaternion.Euler(Vector3.up * rotAmount);
+                if (selectedRigidbody != null)
+                    selectedRigidbody.MoveRotation(newRotation);
+                else
+                    selectedObject.rotation = newRotation;
+                targetRotation = newRotation;
                 undoStack.Push(new UndoAction
                 {
                     actionType = UndoActionType.Rotate,
                     targetObject = selectedObject.gameObject,
                     oldRotation = oldRotation,
-                    newRotation = targetRotation
+                    newRotation = newRotation
                 });
             }
         }
@@ -225,7 +340,7 @@ namespace Nexus
         // ===============================
         private void HandleUndo()
         {
-            if (Input.GetKey(KeyCode.LeftControl) && Input.GetKeyDown(KeyCode.Z))
+            if (IsCtrlPressed() && Input.GetKeyDown(KeyCode.Z))
             {
                 if (undoStack.Count > 0)
                 {
@@ -241,8 +356,12 @@ namespace Nexus
         private void HandleCopyPaste()
         {
             // Copy (Ctrl+C)
-            if (Input.GetKey(KeyCode.LeftControl) && Input.GetKeyDown(KeyCode.C))
+            if (IsCtrlPressed() && Input.GetKeyDown(KeyCode.C))
             {
+                if (selectedObject == null)
+                {
+                    TrySelectUnderMouse();
+                }
                 if (selectedObject != null)
                 {
                     copiedObject = selectedObject.gameObject;
@@ -251,7 +370,7 @@ namespace Nexus
             }
 
             // Paste (Ctrl+V)
-            if (Input.GetKey(KeyCode.LeftControl) && Input.GetKeyDown(KeyCode.V))
+            if (IsCtrlPressed() && Input.GetKeyDown(KeyCode.V))
             {
                 if (copiedObject != null)
                 {
@@ -294,8 +413,32 @@ namespace Nexus
 
         private Vector3 FindValidSpawnPosition()
         {
-            // Simple spawn: 3 units in front of camera
-            return mainCamera.transform.position + mainCamera.transform.forward * 3f;
+            Camera cam = mainCamera;
+            if (cam == null)
+                cam = Camera.main;
+            if (cam == null)
+                return transform.position;
+
+            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+            float clampDistance = Mathf.Min(maxMouseRayDistance, 15f);
+            if (Physics.Raycast(ray, out RaycastHit hit, clampDistance, moveSurfaceMask, QueryTriggerInteraction.Ignore))
+            {
+                if (hit.normal.y >= minGroundNormalY)
+                {
+                    return hit.point;
+                }
+            }
+
+            Vector3 forwardTarget = cam.transform.position + cam.transform.forward * clampDistance;
+            Vector3 downStart = forwardTarget + Vector3.up * 10f;
+            if (Physics.Raycast(downStart, Vector3.down, out RaycastHit downHit, 50f, moveSurfaceMask, QueryTriggerInteraction.Ignore))
+            {
+                if (downHit.normal.y >= minGroundNormalY)
+                {
+                    return downHit.point;
+                }
+            }
+            return cam.transform.position + cam.transform.forward * 3f;
         }
 
         // ===============================
@@ -303,8 +446,12 @@ namespace Nexus
         // ===============================
         private void HandleDelete()
         {
-            if (Input.GetKeyDown(KeyCode.Delete))
+            if (Input.GetKeyDown(KeyCode.Delete) || Input.GetKeyDown(KeyCode.Backspace))
             {
+                if (selectedObject == null)
+                {
+                    TrySelectUnderMouse();
+                }
                 if (selectedObject != null)
                 {
                     GameObject objToDelete = selectedObject.gameObject;
@@ -328,25 +475,18 @@ namespace Nexus
         // ===============================
         // ========= UTILITIES ===========
         // ===============================
-        private void Select(Transform obj)
+        public void Select(Transform obj)
         {
-            // Prefer the transform that actually holds the Rigidbody
-            Rigidbody rb = obj.GetComponent<Rigidbody>();
-            if (rb == null) rb = obj.GetComponentInParent<Rigidbody>();
-            if (rb == null) rb = obj.GetComponentInChildren<Rigidbody>();
+            // Always prefer the Token root as the selected object
+            Transform root = obj;
+            var token = obj.GetComponentInParent<TokenSetup>();
+            if (token != null) root = token.transform;
 
-            if (rb != null)
-            {
-                selectedRigidbody = rb;
-                selectedObject = rb.transform;
-                targetRotation = rb.transform.rotation;
-            }
-            else
-            {
-                selectedObject = obj;
-                selectedRigidbody = null;
-                targetRotation = obj.rotation;
-            }
+            selectedObject = root;
+            // Cache a rigidbody if it belongs to the same token hierarchy, but do not change selectedObject to it
+            Rigidbody rb = root.GetComponentInChildren<Rigidbody>();
+            selectedRigidbody = (rb != null && (rb.transform == root || rb.transform.IsChildOf(root))) ? rb : null;
+            targetRotation = root.rotation;
         }
 
         private void Deselect()

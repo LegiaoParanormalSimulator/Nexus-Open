@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using System.Collections;
 using System.Linq;
+using Nexus;
 
 /// <summary>
 /// Manages dynamic scene loading/unloading.
@@ -76,9 +77,9 @@ public class SceneManager : MonoBehaviour
     
     void Update()
     {
-        if (Input.GetKeyDown(nextSceneKey)) LoadNext();
-        if (Input.GetKeyDown(previousSceneKey)) LoadPrevious();
-        if (Input.GetKeyDown(reloadSceneKey)) Reload();
+        if (InputManager.Instance.GetDown(InputAction.NextScene)) LoadNext();
+        if (InputManager.Instance.GetDown(InputAction.PrevScene)) LoadPrevious();
+        if (InputManager.Instance.GetDown(InputAction.ReloadScene)) Reload();
     }
     
     public void LoadNext()
