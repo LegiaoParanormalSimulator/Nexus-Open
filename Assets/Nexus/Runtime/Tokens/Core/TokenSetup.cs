@@ -270,7 +270,7 @@ public class TokenSetup : MonoBehaviour
                     else
                     {
                         target = directionalBackSprite != null ? directionalBackSprite : (directionalFrontSprite != null ? directionalFrontSprite : (defaultSprite != null ? defaultSprite : spriteRenderer.sprite));
-                        flipX = !lastFlipX; // preserve lateral flip on forward/back movement
+                        flipX = lastFlipX; // preserve lateral flip on forward/back movement
                         lastWasBack = true;
                         Vector3 toCam = mainCamera.transform.position - transform.position; toCam.y = 0f;
                         if (toCam.sqrMagnitude > 0.000001f)
@@ -292,7 +292,6 @@ public class TokenSetup : MonoBehaviour
 
                     if (dpRight > 0f)
                     {
-                        // Right: keep current front/back sprite, adjust flip
                         target = sideBase;
                         if (!lastWasBack)
                             flipX = false;
@@ -301,14 +300,13 @@ public class TokenSetup : MonoBehaviour
                     }
                     else
                     {
-                        // Left: keep current front/back sprite, adjust flip
                         target = sideBase;
                         if (!lastWasBack)
                             flipX = true;
                         else
                             flipX = false;
                     }
-                    lastFlipX = flipX; // update flip for lateral direction only
+                    lastFlipX = flipX;
                     lastMoveAxis = 2;
                 }
             }
@@ -336,7 +334,7 @@ public class TokenSetup : MonoBehaviour
                     else
                     {
                         target = directionalBackSprite != null ? directionalBackSprite : (directionalFrontSprite != null ? directionalFrontSprite : (defaultSprite != null ? defaultSprite : spriteRenderer.sprite));
-                        flipX = !lastFlipX;
+                        flipX = lastFlipX;
                         lastWasBack = true;
                     }
                 }
